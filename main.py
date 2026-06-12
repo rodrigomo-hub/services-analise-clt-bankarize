@@ -1,4 +1,3 @@
-cat > /mnt/user-data/outputs/main.py << 'EOF'
 """
 FastAPI wrapper para Analise CLT Bankarize - VERSÃO 2
 
@@ -7,13 +6,11 @@ Endpoints:
   GET /health - Health check
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 import os
-import sys
 from autocontratacao import fluxo_completo, ReprovadoError
 
-# Carrega variáveis de ambiente
 REFERRAL_LINK_DEFAULT = os.getenv("BANKARIZE_REFERRAL_LINK", None)
 
 app = FastAPI(
@@ -29,7 +26,7 @@ class SimularRequest(BaseModel):
     referral_link: str = None
 
 
-def formatar_anotacao_sucesso(detalhes, simulacao, cliente_info):
+def formatar_anotacao_sucesso(detalhes, simulacao):
     """Formata uma anotação legível para o vendedor."""
     nome = detalhes.get("workerName", "Cliente")
     cpf = detalhes.get("workerDocumentNumber", "")
@@ -53,7 +50,6 @@ OPÇÕES DE CRÉDITO DISPONÍVEIS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
     
-    # Adiciona cada simulação
     tabelas = simulacao.get("data", [])
     opcao_num = 1
     for tab in tabelas:
@@ -64,7 +60,6 @@ OPÇÕES DE CRÉDITO DISPONÍVEIS
             valor = payload.get("gross_value", 0)
             parcela = payload.get("installment_value", 0)
             
-            # Formata prazo de forma legível
             if term == 12:
                 prazo_texto = "1 ANO"
             elif term == 24:
@@ -129,28 +124,19 @@ async def simular(request: SimularRequest):
         - simulacoes: array com opções disponíveis (só se pre_aprovado)
     """
     try:
-        # Limpa CPF
         cpf_limpo = request.cpf.replace(".", "").replace("-", "")
-        
-        # Define referral_link
         referral_link = request.referral_link or REFERRAL_LINK_DEFAULT
         
         print(f"[API] Simulando CPF {cpf_limpo}")
         
-        # Executa o fluxo completo
         resultado_completo = fluxo_completo(cpf_limpo, request.nome, referral_link)
         
-        # Se chegou aqui, é sucesso
-        # Extrai dados para formatar resposta
         detalhes = resultado_completo.get("detalhes", {})
         simulacao = resultado_completo.get("simulacao", {})
         email = resultado_completo.get("email", "")
         senha = resultado_completo.get("senha", "")
         
-        # Monta a anotação legível
-        anotacao = formatar_anotacao_sucesso(detalhes, simulacao, resultado_completo)
-        
-        # Extrai simulações
+        anotacao = formatar_anotacao_sucesso(detalhes, simulacao)
         simulacoes = extrair_simulacoes(simulacao)
         
         return {
@@ -162,7 +148,6 @@ async def simular(request: SimularRequest):
         }
         
     except ReprovadoError as e:
-        # Reprovação de negócio
         return {
             "resultado": "reprovado",
             "anotacao": f"❌ NÃO APROVADO\n\nMotivo: {str(e)}"
@@ -190,7 +175,3 @@ if __name__ == "__main__":
         uvicorn.run("main:app", host=host, port=port, workers=workers)
     else:
         uvicorn.run(app, host=host, port=port)
-EOF
-Saída
-
-exit code 0
