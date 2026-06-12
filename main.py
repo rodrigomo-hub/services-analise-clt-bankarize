@@ -1,5 +1,6 @@
+cat > /mnt/user-data/outputs/main.py << 'EOF'
 """
-FastAPI wrapper para Analise CLT Bankarize
+FastAPI wrapper para Analise CLT Bankarize - VERSÃO 2
 
 Endpoints:
   POST /simular - Simula crédito para um CPF
@@ -18,26 +19,97 @@ REFERRAL_LINK_DEFAULT = os.getenv("BANKARIZE_REFERRAL_LINK", None)
 app = FastAPI(
     title="Analise CLT Bankarize",
     description="API para análise e simulação de crédito CLT via Bankarize",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 
 class SimularRequest(BaseModel):
     cpf: str
     nome: str = "Cliente Corban"
-    referral_link: str = None  # opcional — usa padrão se não informado
+    referral_link: str = None
 
 
-class SimularResponse(BaseModel):
-    status: str
-    cpf: str
-    email: str = None
-    employer_name: str = None
-    available_margin: float = None
-    melhor_tabela: str = None
-    melhor_tabela_net_value: float = None
-    motivo: str = None  # para reprovações
-    erro: str = None  # para erros técnicos
+def formatar_anotacao_sucesso(detalhes, simulacao, cliente_info):
+    """Formata uma anotação legível para o vendedor."""
+    nome = detalhes.get("workerName", "Cliente")
+    cpf = detalhes.get("workerDocumentNumber", "")
+    empresa = detalhes.get("employerName", "")
+    margem = detalhes.get("availableMarginValue", 0)
+    rendimento = detalhes.get("totalEarnings", 0)
+    
+    anotacao = f"""✅ PRÉ-APROVADO PARA CRÉDITO CLT
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DADOS DO CLIENTE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Nome: {nome}
+CPF: {cpf}
+Empresa: {empresa}
+Margem Disponível: R$ {margem:,.2f}
+Rendimento Total: R$ {rendimento:,.2f}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPÇÕES DE CRÉDITO DISPONÍVEIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+    
+    # Adiciona cada simulação
+    tabelas = simulacao.get("data", [])
+    opcao_num = 1
+    for tab in tabelas:
+        if not tab.get("error"):
+            table_name = tab.get("table", {}).get("name", "")
+            term = tab.get("table", {}).get("term", 0)
+            payload = tab.get("simulation", {}).get("payload", {})
+            valor = payload.get("gross_value", 0)
+            parcela = payload.get("installment_value", 0)
+            
+            # Formata prazo de forma legível
+            if term == 12:
+                prazo_texto = "1 ANO"
+            elif term == 24:
+                prazo_texto = "2 ANOS"
+            elif term == 18:
+                prazo_texto = "1 ANO E 6 MESES"
+            elif term == 15:
+                prazo_texto = "1 ANO E 3 MESES"
+            else:
+                prazo_texto = f"{term} MESES"
+            
+            anotacao += f"""
+📌 OPÇÃO {opcao_num} - {table_name} ({prazo_texto})
+   Valor a Receber: R$ {valor:,.2f}
+   Parcela Mensal: R$ {parcela:,.2f}
+   Total de Parcelas: {term} meses
+"""
+            opcao_num += 1
+    
+    anotacao += """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Cliente PRÉ-APROVADO - Grupo Somos H
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+    
+    return anotacao
+
+
+def extrair_simulacoes(simulacao):
+    """Extrai apenas as simulações aprovadas."""
+    resultado = []
+    tabelas = simulacao.get("data", [])
+    
+    for tab in tabelas:
+        if not tab.get("error"):
+            table_name = tab.get("table", {}).get("name", "")
+            payload = tab.get("simulation", {}).get("payload", {})
+            
+            resultado.append({
+                "tabela": table_name,
+                "valor_liberado": round(payload.get("gross_value", 0), 2),
+                "parcela_mensal": round(payload.get("installment_value", 0), 2),
+                "prazo_meses": tab.get("table", {}).get("term", 0)
+            })
+    
+    return resultado
 
 
 @app.get("/health")
@@ -46,116 +118,79 @@ async def health():
     return {"status": "ok", "service": "analise-clt-bankarize"}
 
 
-@app.post("/simular", response_model=dict)
+@app.post("/simular")
 async def simular(request: SimularRequest):
     """
     Simula crédito CLT para um CPF.
     
-    Args:
-        cpf: CPF do cliente (com ou sem formatação)
-        nome: Nome do cliente (padrão: "Cliente Corban")
-        referral_link: URL de referral com parâmetro R= (opcional)
-    
-    Returns:
-        dict com resultado da simulação
-    
-    Status retornado:
-        - "sucesso": simulação realizada com oferta válida
-        - "sem_oferta": simulação ok mas sem oferta viável (margem < R$1000)
-        - "reprovado": CPF processado mas reprovado pelos fundos
-        - "erro": erro técnico durante o fluxo
+    Retorna:
+        - resultado: "pre_aprovado" | "reprovado" | "erro"
+        - anotacao: texto formatado para o vendedor ler
+        - simulacoes: array com opções disponíveis (só se pre_aprovado)
     """
     try:
         # Limpa CPF
         cpf_limpo = request.cpf.replace(".", "").replace("-", "")
         
-        # Define referral_link (prioridade: requisição > ENV > None)
+        # Define referral_link
         referral_link = request.referral_link or REFERRAL_LINK_DEFAULT
         
-        print(f"[API] Simulando CPF {cpf_limpo} com link: {referral_link}")
+        print(f"[API] Simulando CPF {cpf_limpo}")
         
-        # Executa o fluxo
-        resultado = fluxo_completo(cpf_limpo, request.nome, referral_link)
+        # Executa o fluxo completo
+        resultado_completo = fluxo_completo(cpf_limpo, request.nome, referral_link)
         
-        return resultado
+        # Se chegou aqui, é sucesso
+        # Extrai dados para formatar resposta
+        detalhes = resultado_completo.get("detalhes", {})
+        simulacao = resultado_completo.get("simulacao", {})
+        email = resultado_completo.get("email", "")
+        senha = resultado_completo.get("senha", "")
+        
+        # Monta a anotação legível
+        anotacao = formatar_anotacao_sucesso(detalhes, simulacao, resultado_completo)
+        
+        # Extrai simulações
+        simulacoes = extrair_simulacoes(simulacao)
+        
+        return {
+            "resultado": "pre_aprovado",
+            "anotacao": anotacao,
+            "email": email,
+            "senha": senha,
+            "simulacoes": simulacoes
+        }
         
     except ReprovadoError as e:
-        # Reprovação de negócio (não é erro técnico)
+        # Reprovação de negócio
         return {
-            "status": "reprovado",
-            "cpf": cpf_limpo,
-            "motivo": str(e)
+            "resultado": "reprovado",
+            "anotacao": f"❌ NÃO APROVADO\n\nMotivo: {str(e)}"
         }
     
     except Exception as e:
         print(f"[API-ERROR] {type(e).__name__}: {e}")
         return {
-            "status": "erro",
-            "cpf": cpf_limpo,
-            "erro": f"{type(e).__name__}: {str(e)}"
+            "resultado": "erro",
+            "anotacao": f"⚠️ ERRO NO PROCESSAMENTO\n\n{type(e).__name__}: {str(e)}"
         }
-
-
-@app.post("/simular-lote")
-async def simular_lote(cpfs: list[str], nome: str = "Cliente Corban", referral_link: str = None):
-    """
-    Simula crédito para múltiplos CPFs em lote.
-    
-    Args:
-        cpfs: Lista de CPFs
-        nome: Nome padrão dos clientes
-        referral_link: URL de referral com parâmetro R= (opcional)
-    
-    Returns:
-        list de resultados (um por CPF)
-    """
-    resultados = []
-    
-    for idx, cpf in enumerate(cpfs, 1):
-        try:
-            cpf_limpo = cpf.replace(".", "").replace("-", "")
-            print(f"[LOTE] Processando {idx}/{len(cpfs)}: {cpf_limpo}")
-            
-            resultado = fluxo_completo(cpf_limpo, nome, referral_link)
-            resultados.append(resultado)
-            
-        except ReprovadoError as e:
-            resultados.append({
-                "status": "reprovado",
-                "cpf": cpf_limpo,
-                "motivo": str(e)
-            })
-        except Exception as e:
-            resultados.append({
-                "status": "erro",
-                "cpf": cpf_limpo,
-                "erro": f"{type(e).__name__}: {str(e)}"
-            })
-    
-    # Resumo
-    sucessos = sum(1 for r in resultados if r.get("status") == "sucesso")
-    reprovados = sum(1 for r in resultados if r.get("status") == "reprovado")
-    erros = sum(1 for r in resultados if r.get("status") == "erro")
-    
-    return {
-        "total": len(resultados),
-        "sucessos": sucessos,
-        "reprovados": reprovados,
-        "erros": erros,
-        "resultados": resultados
-    }
 
 
 if __name__ == "__main__":
     import uvicorn
     
-    # Configurações via ENV ou defaults
     host = os.getenv("API_HOST", "0.0.0.0")
     port = int(os.getenv("API_PORT", "8000"))
-    workers = int(os.getenv("API_WORKERS", "1"))
+    workers = int(os.getenv("API_WORKERS", "0"))
     
-    print(f"[STARTUP] Iniciando Analise CLT Bankarize API")
+    print(f"[STARTUP] Iniciando Analise CLT Bankarize API v2.0.0")
     print(f"[STARTUP] Host: {host}:{port}")
-    print(f"[STARTUP] Workers: {workers}")
     
-    uvicorn.run(app, host=host, port=port, workers=workers)
+    if workers > 0:
+        uvicorn.run("main:app", host=host, port=port, workers=workers)
+    else:
+        uvicorn.run(app, host=host, port=port)
+EOF
+Saída
+
+exit code 0
