@@ -57,7 +57,7 @@ OPÇÕES DE CRÉDITO DISPONÍVEIS
             table_name = tab.get("table", {}).get("name", "")
             term = tab.get("table", {}).get("term", 0)
             payload = tab.get("simulation", {}).get("payload", {})
-            valor = payload.get("gross_value", 0)
+            valor = payload.get("net_value", 0)
             parcela = payload.get("installment_value", 0)
             
             if term == 12:
@@ -99,7 +99,7 @@ def extrair_simulacoes(simulacao):
             
             resultado.append({
                 "tabela": table_name,
-                "valor_liberado": round(payload.get("gross_value", 0), 2),
+                "valor_liberado": round(payload.get("net_value", 0), 2),
                 "parcela_mensal": round(payload.get("installment_value", 0), 2),
                 "prazo_meses": tab.get("table", {}).get("term", 0)
             })
